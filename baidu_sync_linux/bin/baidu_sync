@@ -1,0 +1,478 @@
+#!/bin/bash
+
+# 百度云盘同步工具
+# 整合版：合并了bai和baidu_realtime_sync.sh的功能
+# 作者：Claude
+# 版本：2.0
+
+# 设置日志文件
+LOG_DIR="$HOME/baidu_sync_project/logs"
+LOG_FILE="$LOG_DIR/sync_$(date +%Y%m%d).log"
+
+# 确保日志目录存在
+mkdir -p "$LOG_DIR"
+
+# 配置文件路径
+CONFIG_DIR="$HOME/baidu_sync_project/config"
+CONFIG_FILE="$CONFIG_DIR/sync_config.json"
+
+# 默认变量
+LOCAL_PATH=""
+REMOTE_PATH=""
+MAX_RETRIES=3      # 上传失败重试次数
+EXCLUDE_PATTERNS=".git .svn .DS_Store *.tmp *.temp"  # 排除模式
+
+# 日志函数
+log() {
+    local level="$1"
+    local message="$2"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $message" | tee -a "$LOG_FILE"
+}
+
+# 简化输出函数
+info() {
+    echo "[信息] $1"
+}
+
+error() {
+    echo "[错误] $1"
+}
+
+warning() {
+    echo "[警告] $1"
+}
+
+# 帮助信息
+show_help() {
+    echo "百度云盘同步工具 - 整合版"
+    echo ""
+    echo "用法: $(basename $0) [选项] [文件路径]"
+    echo ""
+    echo "选项:"
+    echo "  -up, --upload        上传文件或目录到百度云盘(不删除远端文件)"
+    echo "  -down, --download    从百度云盘下载文件或目录(不删除本地文件)"
+    echo "  -sync                完全同步，删除远端已在本地删除的文件"
+    echo "  -rsync               反向同步，删除本地已在远端删除的文件"
+    echo "  -config              配置同步参数"
+    echo "  -status              查看同步状态"
+    echo "  -h, --help           显示帮助信息"
+    echo ""
+    echo "示例:"
+    echo "  $(basename $0) -up              上传整个同步目录到云盘(不删除)"
+    echo "  $(basename $0) -up file.txt     仅上传指定文件到云盘"
+    echo "  $(basename $0) -sync            完全同步，远端将与本地完全一致(包括删除)"
+    echo "  $(basename $0) -down            下载整个同步目录到本地(不删除)"
+    echo "  $(basename $0) -down doc.pdf    仅下载指定文件到本地"
+    echo ""
+}
+
+# 检查依赖
+check_dependencies() {
+    log "INFO" "检查依赖..."
+    
+    # 检查bypy
+    if ! command -v bypy &> /dev/null; then
+        log "ERROR" "未找到bypy命令，请先安装: pip3 install bypy"
+        exit 1
+    fi
+    
+    # 检查jq
+    if ! command -v jq &> /dev/null; then
+        log "ERROR" "未找到jq命令，请先安装: sudo apt-get install jq"
+        exit 1
+    fi
+    
+    log "INFO" "依赖检查通过"
+}
+
+# 创建默认配置
+create_default_config() {
+    log "INFO" "创建默认配置..."
+    mkdir -p "$CONFIG_DIR"
+    
+    cat > "$CONFIG_FILE" << EOF
+{
+    "local_path": "$HOME/sync_folder",
+    "remote_path": "/sync_folder",
+    "max_retries": 3,
+    "exclude_patterns": ".git .svn .DS_Store *.tmp *.temp"
+}
+EOF
+    
+    log "INFO" "默认配置已创建: $CONFIG_FILE"
+}
+
+# 加载配置
+load_config() {
+    log "INFO" "加载配置..."
+    
+    if [ ! -f "$CONFIG_FILE" ]; then
+        log "WARNING" "配置文件不存在，创建默认配置"
+        create_default_config
+    fi
+    
+    # 使用jq解析配置文件
+    LOCAL_PATH=$(jq -r '.local_path' "$CONFIG_FILE")
+    REMOTE_PATH=$(jq -r '.remote_path' "$CONFIG_FILE")
+    MAX_RETRIES=$(jq -r '.max_retries // 3' "$CONFIG_FILE")
+    EXCLUDE_PATTERNS=$(jq -r '.exclude_patterns' "$CONFIG_FILE")
+    
+    # 替换HOME变量
+    LOCAL_PATH="${LOCAL_PATH/\$HOME/$HOME}"
+    
+    log "INFO" "配置加载完成:"
+    log "INFO" "  - 本地路径: $LOCAL_PATH"
+    log "INFO" "  - 远程路径: $REMOTE_PATH"
+    
+    # 确保本地目录存在
+    mkdir -p "$LOCAL_PATH"
+}
+
+# 检查文件是否应被排除
+should_exclude() {
+    local file="$1"
+    local basename=$(basename "$file")
+    
+    for pattern in $EXCLUDE_PATTERNS; do
+        if [[ "$basename" == $pattern ]]; then
+            return 0  # 应排除
+        fi
+    done
+    
+    return 1  # 不排除
+}
+
+# 全量同步本地到百度云（不删除）
+full_sync_to_baidu() {
+    log "INFO" "执行全量同步: 本地 -> 百度云盘"
+    
+    # 使用bypy上传整个目录
+    bypy syncup "$LOCAL_PATH" "$REMOTE_PATH" > /dev/null 2>&1
+    
+    if [ $? -eq 0 ]; then
+        log "INFO" "全量同步成功: $LOCAL_PATH -> $REMOTE_PATH"
+        return 0
+    else
+        log "ERROR" "全量同步失败: $LOCAL_PATH -> $REMOTE_PATH"
+        return 1
+    fi
+}
+
+# 全量同步百度云到本地（不删除）
+full_sync_from_baidu() {
+    log "INFO" "执行全量同步: 百度云盘 -> 本地"
+    
+    # 使用bypy下载整个目录
+    bypy syncdown "$REMOTE_PATH" "$LOCAL_PATH" > /dev/null 2>&1
+    
+    if [ $? -eq 0 ]; then
+        log "INFO" "全量同步成功: $REMOTE_PATH -> $LOCAL_PATH"
+        return 0
+    else
+        log "ERROR" "全量同步失败: $REMOTE_PATH -> $LOCAL_PATH"
+        return 1
+    fi
+}
+
+# 完全同步（包括删除远端文件）
+full_sync() {
+    log "INFO" "开始完全同步(包括删除): $LOCAL_PATH -> $REMOTE_PATH"
+    warning "这将删除远端目录中不存在于本地的所有文件"
+    
+    # 使用bypy的syncup命令，第三个参数1表示删除远端不存在的文件
+    bypy syncup "$LOCAL_PATH" "$REMOTE_PATH" 1 > /dev/null 2>&1
+    
+    if [ $? -eq 0 ]; then
+        log "INFO" "完全同步完成: $LOCAL_PATH -> $REMOTE_PATH"
+        info "完全同步完成"
+        return 0
+    else
+        log "ERROR" "完全同步失败: $LOCAL_PATH -> $REMOTE_PATH"
+        error "同步失败，详情请查看日志"
+        return 1
+    fi
+}
+
+# 反向同步（包括删除本地文件）
+reverse_sync() {
+    log "INFO" "开始反向同步(包括删除): $REMOTE_PATH -> $LOCAL_PATH"
+    warning "这将删除本地目录中不存在于远端的所有文件"
+    
+    # 使用bypy的syncdown命令，第三个参数1表示删除本地不存在的文件
+    bypy syncdown "$REMOTE_PATH" "$LOCAL_PATH" 1 > /dev/null 2>&1
+    
+    if [ $? -eq 0 ]; then
+        log "INFO" "反向同步完成: $REMOTE_PATH -> $LOCAL_PATH"
+        info "反向同步完成"
+        return 0
+    else
+        log "ERROR" "反向同步失败: $REMOTE_PATH -> $LOCAL_PATH"
+        error "同步失败，详情请查看日志"
+        return 1
+    fi
+}
+
+# 授权百度云盘
+authorize_baidu() {
+    log "INFO" "授权百度云盘账号..."
+    bypy info
+    
+    if [ $? -eq 0 ]; then
+        log "INFO" "百度云盘账号已授权"
+        return 0
+    else
+        log "ERROR" "百度云盘账号授权失败"
+        return 1
+    fi
+}
+
+# 上传单个文件或目录
+upload_file() {
+    local file="$1"
+    local file_path
+    
+    # 检查文件是否存在
+    if [ ! -e "$file" ]; then
+        # 如果给定的不是绝对路径，尝试在同步目录中查找
+        if [[ "$file" != /* ]]; then
+            file_path="$LOCAL_PATH/$file"
+            if [ ! -e "$file_path" ]; then
+                error "文件或目录不存在: $file 或 $file_path"
+                exit 1
+            fi
+        else
+            error "文件或目录不存在: $file"
+            exit 1
+        fi
+    else
+        file_path="$file"
+    fi
+    
+    # 检查是目录还是文件
+    if [ -d "$file_path" ]; then
+        # 是目录，递归上传
+        info "上传目录: $file_path"
+        bypy -v syncup "$file_path" "$REMOTE_PATH/$(basename "$file_path")"
+    else
+        # 是文件，单独上传
+        local relative_path
+        
+        # 检查文件是否在同步目录内
+        if [[ "$file_path" == "$LOCAL_PATH"/* ]]; then
+            relative_path="${file_path#$LOCAL_PATH/}"
+            remote_path="$REMOTE_PATH/$relative_path"
+            
+            # 确保远程目录存在
+            remote_dir=$(dirname "$remote_path")
+            bypy -v mkdir -p "$remote_dir"
+            
+            info "上传文件: $file_path -> $remote_path"
+            bypy -v upload "$file_path" "$remote_path"
+        else
+            # 文件不在同步目录内，上传到远程的根目录
+            info "上传文件: $file_path -> $REMOTE_PATH/$(basename "$file_path")"
+            bypy -v upload "$file_path" "$REMOTE_PATH/$(basename "$file_path")"
+        fi
+    fi
+}
+
+# 下载单个文件或目录
+download_file() {
+    local file="$1"
+    
+    # 如果没有指定文件，提示用户
+    if [ -z "$file" ]; then
+        error "未指定远程文件路径，请指定要下载的文件或目录"
+        exit 1
+    fi
+    
+    # 如果文件路径以/开头，则认为是绝对路径，否则认为是相对于远程根目录的路径
+    if [[ "$file" == /* ]]; then
+        remote_path="$file"
+        local_dir="$LOCAL_PATH$(dirname "$file")"
+    else
+        remote_path="$REMOTE_PATH/$file"
+        local_dir="$LOCAL_PATH/$(dirname "$file")"
+    fi
+    
+    # 确保本地目录存在
+    mkdir -p "$local_dir"
+    
+    info "下载文件: $remote_path -> $LOCAL_PATH/$file"
+    bypy -v downfile "$remote_path" "$LOCAL_PATH/$file"
+    
+    # 检查下载是否成功
+    if [ $? -ne 0 ]; then
+        warning "下载可能失败，尝试作为目录下载..."
+        local remote_dir
+        local local_target_dir
+        
+        if [[ "$file" == /* ]]; then
+            remote_dir="$file"
+            local_target_dir="$LOCAL_PATH$file"
+        else
+            remote_dir="$REMOTE_PATH/$file"
+            local_target_dir="$LOCAL_PATH/$file"
+        fi
+        
+        mkdir -p "$local_target_dir"
+        bypy -v syncdown "$remote_dir" "$local_target_dir"
+    fi
+}
+
+# 本地同步到远程（上传）
+sync_to_remote() {
+    log "INFO" "开始同步: 本地 -> 百度云盘"
+    check_dependencies
+    load_config
+    authorize_baidu
+    
+    # 执行全量同步到云盘
+    info "开始同步整个目录: $LOCAL_PATH -> $REMOTE_PATH"
+    info "此操作不会删除远端文件，如需同步删除请使用 -sync"
+    full_sync_to_baidu
+    
+    log "INFO" "同步完成: 本地 -> 百度云盘"
+}
+
+# 远程同步到本地（下载）
+sync_from_remote() {
+    log "INFO" "开始同步: 百度云盘 -> 本地"
+    check_dependencies
+    load_config
+    authorize_baidu
+    
+    # 执行全量同步到本地
+    info "开始同步整个目录: $REMOTE_PATH -> $LOCAL_PATH"
+    info "此操作不会删除本地文件，如需同步删除请使用 -rsync"
+    full_sync_from_baidu
+    
+    log "INFO" "同步完成: 百度云盘 -> 本地"
+}
+
+# 查看同步状态
+check_status() {
+    check_dependencies
+    load_config
+    log "INFO" "同步状态信息:"
+    info "同步状态信息:"
+    info "  - 本地路径: $LOCAL_PATH"
+    info "  - 远程路径: $REMOTE_PATH"
+    info "  - 日志文件: $LOG_FILE"
+    
+    # 显示百度云盘信息
+    bypy info
+}
+
+# 配置同步参数
+configure_sync() {
+    log "INFO" "配置同步参数..."
+    check_dependencies
+    
+    # 读取当前配置或使用默认值
+    if [ -f "$CONFIG_FILE" ]; then
+        load_config
+        current_local="$LOCAL_PATH"
+        current_remote="$REMOTE_PATH"
+        current_exclude="$EXCLUDE_PATTERNS"
+    else
+        current_local="$HOME/baidu_sync"
+        current_remote="/baidu_sync"
+        current_exclude=".git .svn .DS_Store *.tmp *.temp"
+    fi
+    
+    # 提示用户输入新配置
+    echo "配置百度云盘同步参数"
+    echo "-------------------"
+    read -p "本地同步目录 [$current_local]: " local_path
+    read -p "远程同步目录 [$current_remote]: " remote_path
+    read -p "排除模式 [$current_exclude]: " exclude_patterns
+    
+    # 使用默认值如果用户未输入
+    local_path=${local_path:-$current_local}
+    remote_path=${remote_path:-$current_remote}
+    exclude_patterns=${exclude_patterns:-$current_exclude}
+    
+    # 创建配置文件
+    mkdir -p "$CONFIG_DIR"
+    cat > "$CONFIG_FILE" << EOF
+{
+    "local_path": "$local_path",
+    "remote_path": "$remote_path",
+    "max_retries": $MAX_RETRIES,
+    "exclude_patterns": "$exclude_patterns"
+}
+EOF
+    
+    log "INFO" "配置已保存: $CONFIG_FILE"
+    info "配置已保存到: $CONFIG_FILE"
+    
+    # 确保本地目录存在
+    mkdir -p "$local_path"
+}
+
+# 主函数
+main() {
+    # 检查是否有参数
+    if [ $# -eq 0 ]; then
+        show_help
+        exit 0
+    fi
+    
+    # 处理命令行参数
+    case "$1" in
+        -up|--upload)
+            check_dependencies
+            load_config
+            shift
+            if [ $# -eq 0 ]; then
+                # 没有指定文件，执行整个目录同步
+                sync_to_remote
+            else
+                # 上传指定文件或目录
+                upload_file "$1"
+            fi
+            ;;
+        -down|--download)
+            check_dependencies
+            load_config
+            shift
+            if [ $# -eq 0 ]; then
+                # 没有指定文件，执行整个目录同步
+                sync_from_remote
+            else
+                # 下载指定文件或目录
+                download_file "$1"
+            fi
+            ;;
+        -sync)
+            check_dependencies
+            load_config
+            authorize_baidu
+            full_sync
+            ;;
+        -rsync)
+            check_dependencies
+            load_config
+            authorize_baidu
+            reverse_sync
+            ;;
+        -config|--config)
+            configure_sync
+            ;;
+        -status|--status)
+            check_status
+            ;;
+        -h|--help)
+            show_help
+            ;;
+        *)
+            error "未知选项: $1"
+            show_help
+            exit 1
+            ;;
+    esac
+}
+
+# 执行主函数
+main "$@" 

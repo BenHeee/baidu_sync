@@ -1,0 +1,9 @@
+{
+    "local_path": "/home/ben_he/baidu_share",
+    "remote_path": "/rk3588_firmware",
+    "sync_interval": 60,
+    "use_real_time": true,
+    "sync_mode": "bidrectional",
+    "max_retries": 3,
+    "exclude_patterns": ".git .svn .DS_Store *.tmp *.temp"
+}
