@@ -1,23 +1,16 @@
 # Baidu Cloud Download Sync Script
 
+# 设置PowerShell输出编码为UTF-8
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
 # Get script directory
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # Get main tool directory
-$mainToolDir = "D:\RK3588\baidu_sync_windows"
-
-# If not found, try to find it by looking up from current directory
-if (-not (Test-Path $mainToolDir)) {
-    $mainToolDir = Join-Path (Split-Path -Parent $scriptDir) "baidu_sync_windows"
-}
+$mainToolDir = Split-Path -Parent $scriptDir
 
 # Get sync tool path
-$syncToolPath = "$mainToolDir\sync_with_delete.ps1"
-
-# If still not found, try using a relative path
-if (-not (Test-Path $syncToolPath)) {
-    $syncToolPath = "..\sync_with_delete.ps1"
-}
+$syncToolPath = Join-Path $mainToolDir "sync_with_delete.ps1"
 
 Write-Host "========================================"
 Write-Host "    Baidu Cloud Sync Tool - Download"

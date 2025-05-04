@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 setlocal enabledelayedexpansion
 
 :: 百度云盘同步工具 - Windows安装脚本（简化版）
